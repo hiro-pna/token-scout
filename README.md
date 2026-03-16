@@ -7,8 +7,8 @@
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://python.org)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-Hooks_API-blueviolet.svg)](https://docs.anthropic.com/en/docs/claude-code/hooks)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-63%20passed-brightgreen.svg)]()
-[![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero-orange.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-120%20passed-brightgreen.svg)]()
+[![Zero Dependencies](https://img.shields.io/badge/Core-Zero%20Deps-orange.svg)]()
 
 **Stop burning tokens on blind file reads.** TokenScout is a drop-in hook system for Claude Code that builds a structural map of your repo *before* Claude starts reading — so it only opens the files that actually matter.
 
@@ -78,10 +78,36 @@ That's it. TokenScout activates automatically via Claude Code's hooks API. You'l
 🔭 TokenScout: Scouting file metadata...
 ```
 
+### Optional: Enable LLM-Enhanced Mode
+
+TokenScout works great with zero dependencies. But if you have **Claude Code** installed (which you do), it **automatically** uses OAuth to call Haiku for intelligent code navigation — **zero extra cost**, included in your Claude Code subscription.
+
+**Authentication priority:**
+
+1. **OAuth via `claude -p`** (auto-detected, free) — uses your existing Claude Code login
+2. **`ANTHROPIC_API_KEY`** (fallback) — pay-per-token if Claude CLI is unavailable
+3. **Heuristics only** — if neither is available, BM25 + keyword matching still works
+
+```bash
+# Option 1: Just use Claude Code (OAuth) — nothing to configure!
+# TokenScout auto-detects `claude` CLI and uses your subscription.
+
+# Option 2: Explicit API key (only if claude CLI is not available)
+export ANTHROPIC_API_KEY="sk-ant-api03-..."
+```
+
+LLM-enhanced mode enables:
+- **LLM query augmentation** — Haiku expands your query with synonyms and related concepts
+- **LLM confidence assessment** — Haiku evaluates "have we gathered enough context?"
+- **LLM semantic ranking** — Haiku re-ranks candidates by semantic relevance
+
+Cost with OAuth: **$0** (included in subscription). Cost with API key: ~$0.001-0.003 per session.
+
 ### Requirements
 
-- **Python 3.8+** (no pip install needed — stdlib only)
-- **Claude Code** with hooks support
+- **Python 3.8+** (no pip install needed — stdlib only for core)
+- **Claude Code** with hooks support (also provides free OAuth for LLM mode)
+- **Optional:** `ANTHROPIC_API_KEY` as fallback if `claude` CLI is unavailable
 
 ---
 
@@ -209,7 +235,8 @@ your-project/
         ├── post_tool_use_hook.sh
         ├── stop_hook.py              # Phase 3: confidence-gated stopping
         ├── stop_hook.sh
-        ├── test_tokenscout_hooks.py  # 51 unit + integration tests
+        ├── tokenscout_llm.py         # LLM integration: Haiku query augment + confidence + ranking
+        ├── test_tokenscout_hooks.py  # 108 unit + integration tests
         ├── benchmark_token_savings.py # 12 benchmark tests + visual reports
         └── realworld_benchmark.py    # Real-world session analyzer
 ```
@@ -272,13 +299,13 @@ cat .claude/hooks/tokenscout_state.json | python3 -m json.tool
 ## 🧪 Testing
 
 ```bash
-# Unit + integration tests (51 tests)
+# Unit + integration tests (103 tests: BM25, LLM, graphs, hooks, etc.)
 python3 -m pytest .claude/hooks/test_tokenscout_hooks.py -v
 
 # Token savings benchmarks (12 tests)
 python3 -m pytest .claude/hooks/benchmark_token_savings.py -v -s
 
-# All 63 tests
+# All 120 tests (108 unit + 12 benchmark)
 python3 -m pytest .claude/hooks/ -v
 ```
 
@@ -339,12 +366,14 @@ TokenScout is inspired by the [FastCode paper](https://arxiv.org/abs/2603.01012)
 | G_dep (dependency graph) | ✅ Full | Import-based, forward + reverse |
 | G_inh (inheritance graph) | ✅ Regex-based | Extracts extends/implements across 7+ languages |
 | G_call (call graph) | ✅ Lightweight | Cross-file symbol resolution via regex |
+| BM25 sparse retrieval | ✅ Full | Pure Python BM25 with IDF weighting, length normalization |
+| LLM-powered query augmentation | ✅ Optional | Claude Haiku via API key (falls back to heuristics) |
+| LLM-based confidence (κ) self-assessment | ✅ Optional | Haiku assesses every 5 tool calls (blended 70/30 with heuristic) |
+| LLM semantic ranking | ✅ Optional | Haiku re-ranks BM25 candidates (blended 60/40) |
 | Tree-sitter AST parsing | ❌ | Uses regex — no external deps, ~80% accuracy |
-| BM25 + embedding hybrid indexing | ❌ | Keyword matching only — no embedding model |
-| LLM-powered query augmentation | ❌ | Hooks can't call LLM API — uses heuristics |
-| LLM-based confidence (κ) self-assessment | ❌ | Multi-signal heuristic instead |
+| Embedding-based dense retrieval | ❌ | No embedding model — BM25 + LLM ranking instead |
 
-**Why the gaps?** FastCode is a standalone framework with its own server, embedding model, and LLM API access. TokenScout runs as Claude Code hooks — it must execute in milliseconds, with zero dependencies, and no API calls. Features requiring LLM inference or GPU-based embeddings are fundamentally incompatible with the hooks architecture.
+**Two modes:** Without LLM access, TokenScout runs in **zero-dependency mode** using BM25 + multi-signal heuristics. With Claude Code installed (OAuth, free) or an API key, it upgrades to **LLM-enhanced mode** where Claude Haiku handles query expansion, confidence assessment, and semantic ranking — filling most gaps from the original paper. OAuth is auto-detected and preferred over API keys.
 
 ---
 
@@ -362,7 +391,7 @@ TokenScout is inspired by the [FastCode paper](https://arxiv.org/abs/2603.01012)
 PRs welcome! Areas that could use help:
 
 - **More language parsers** — improve signature extraction for existing or new languages
-- **Smarter candidate ranking** — ML-based relevance scoring instead of keyword matching
+- **Embedding integration** — dense retrieval for hybrid BM25 + embedding ranking
 - **Real-world benchmarks** — test on open-source repos and report results
 - **Confidence calibration** — better heuristics for epistemic confidence estimation
 
@@ -372,6 +401,6 @@ PRs welcome! Areas that could use help:
 
 **If TokenScout saves you tokens, give it a ⭐**
 
-Built with Claude Code Hooks API · Zero dependencies · Drop-in installation
+Built with Claude Code Hooks API · Zero-dep core · Optional LLM-enhanced mode · Drop-in installation
 
 </div>

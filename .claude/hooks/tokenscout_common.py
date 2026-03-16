@@ -839,3 +839,153 @@ def read_hook_input() -> Dict[str, Any]:
         return json.load(sys.stdin)
     except (json.JSONDecodeError, IOError):
         return {}
+
+
+# ─── BM25 Sparse Retrieval (§3.2.1) ────────────────────────────────────────
+
+import math
+
+class BM25Index:
+    """
+    BM25 (Best Matching 25) sparse retrieval over code files.
+
+    Implements the Okapi BM25 ranking function from the FastCode paper §3.2.1.
+    Indexes file signatures, paths, and symbol names to score relevance
+    against a search query.
+
+    Formula: score(D, Q) = Σ IDF(q_i) · (tf(q_i, D) · (k1+1)) / (tf(q_i, D) + k1 · (1 - b + b · |D|/avgdl))
+
+    Parameters:
+      k1 = 1.5 (term frequency saturation)
+      b  = 0.75 (length normalization)
+    """
+
+    def __init__(self, k1: float = 1.5, b: float = 0.75):
+        self.k1 = k1
+        self.b = b
+        self.doc_count = 0
+        self.avg_dl = 0.0
+        self.doc_lens: Dict[str, int] = {}           # path -> doc length (in terms)
+        self.doc_tf: Dict[str, Dict[str, int]] = {}   # path -> {term: count}
+        self.df: Dict[str, int] = {}                  # term -> num docs containing it
+        self.corpus_indexed = False
+
+    def index_repo(self, repo_map: Dict[str, Any]) -> None:
+        """
+        Build BM25 index from repo_map.
+        Each 'document' is a file represented by its path segments + signature names + import names.
+        """
+        files = repo_map.get("files", {})
+        deps = repo_map.get("dependencies", {})
+
+        self.doc_count = 0
+        self.avg_dl = 0.0
+        self.doc_lens = {}
+        self.doc_tf = {}
+        self.df = {}
+        total_len = 0
+
+        for path, info in files.items():
+            terms = self._tokenize_file(path, info, deps.get(path, []))
+            if not terms:
+                continue
+
+            self.doc_count += 1
+            tf: Dict[str, int] = {}
+            for t in terms:
+                tf[t] = tf.get(t, 0) + 1
+
+            self.doc_tf[path] = tf
+            self.doc_lens[path] = len(terms)
+            total_len += len(terms)
+
+            for t in tf:
+                self.df[t] = self.df.get(t, 0) + 1
+
+        self.avg_dl = total_len / max(1, self.doc_count)
+        self.corpus_indexed = True
+
+    def query(self, query_text: str, top_k: int = 20) -> List[Tuple[str, float]]:
+        """
+        Score all documents against a query, return top-k (path, score) pairs.
+        """
+        if not self.corpus_indexed or self.doc_count == 0:
+            return []
+
+        query_terms = self._tokenize_query(query_text)
+        if not query_terms:
+            return []
+
+        scores: Dict[str, float] = {}
+
+        for term in query_terms:
+            if term not in self.df:
+                continue
+            # IDF = ln((N - df + 0.5) / (df + 0.5) + 1)
+            idf = math.log((self.doc_count - self.df[term] + 0.5) / (self.df[term] + 0.5) + 1.0)
+
+            for path, tf_map in self.doc_tf.items():
+                if term not in tf_map:
+                    continue
+                tf = tf_map[term]
+                dl = self.doc_lens[path]
+                # BM25 term score
+                numerator = tf * (self.k1 + 1)
+                denominator = tf + self.k1 * (1 - self.b + self.b * dl / self.avg_dl)
+                scores[path] = scores.get(path, 0.0) + idf * numerator / denominator
+
+        ranked = sorted(scores.items(), key=lambda x: -x[1])
+        return ranked[:top_k]
+
+    def _tokenize_file(self, path: str, info: Dict, imports: List[str]) -> List[str]:
+        """Convert a file entry into a bag of terms for indexing."""
+        terms = []
+
+        # Path segments (split by / and .)
+        for part in re.split(r'[/\\._\-]', path.lower()):
+            if part and len(part) > 1:
+                terms.append(part)
+                # Also add camelCase splits
+                terms.extend(self._split_camel(part))
+
+        # Signature names
+        for sig in info.get("signatures", []):
+            name = sig.get("name", "").lower()
+            for part in re.split(r'[._]', name):
+                if part and len(part) > 1:
+                    terms.append(part)
+                    terms.extend(self._split_camel(part))
+
+            # Signature text keywords
+            sig_str = sig.get("signature", "").lower()
+            for word in re.findall(r'[a-z_][a-z0-9_]+', sig_str):
+                if len(word) > 2:
+                    terms.append(word)
+
+        # Import names
+        for imp in imports:
+            for part in re.split(r'[./\\]', imp.lower()):
+                if part and len(part) > 1:
+                    terms.append(part)
+
+        # Language
+        lang = info.get("lang", "")
+        if lang:
+            terms.append(lang)
+
+        return terms
+
+    def _tokenize_query(self, query: str) -> List[str]:
+        """Tokenize a search query into terms."""
+        terms = []
+        for word in re.findall(r'[a-z_][a-z0-9_]+', query.lower()):
+            if len(word) > 1:
+                terms.append(word)
+                terms.extend(self._split_camel(word))
+        return terms
+
+    @staticmethod
+    def _split_camel(word: str) -> List[str]:
+        """Split camelCase/PascalCase into subwords."""
+        parts = re.findall(r'[a-z]+|[A-Z][a-z]*', word)
+        return [p.lower() for p in parts if len(p) > 1]

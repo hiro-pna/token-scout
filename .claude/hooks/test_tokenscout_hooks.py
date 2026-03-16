@@ -38,7 +38,12 @@ from tokenscout_common import (
     _parse_java_sigs, _parse_rust_sigs, _parse_generic_sigs,
     _build_inheritance_graph, _build_call_graph, _extract_bases,
     find_related_via_graphs, estimate_confidence_boost,
+    BM25Index,
     LANG_MAP, IGNORE_DIRS,
+)
+from tokenscout_llm import (
+    is_llm_available, augment_query, assess_confidence,
+    semantic_rank_candidates, build_repo_summary, build_file_summaries,
 )
 
 
@@ -1335,6 +1340,387 @@ class TestRealWorldBenchmark(unittest.TestCase):
         self.assertIn("tokens_estimated", data)
         self.assertIn("budget_utilization_pct", data)
         self.assertEqual(data["repo_files"], 10)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BM25 Sparse Retrieval Tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestBM25Index(TestRepoSetup):
+    """Test BM25 sparse retrieval implementation."""
+
+    def test_empty_index(self):
+        """BM25 on empty repo returns no results."""
+        bm25 = BM25Index()
+        bm25.index_repo({"files": {}, "dependencies": {}})
+        results = bm25.query("auth login")
+        self.assertEqual(results, [])
+
+    def test_index_basic_repo(self):
+        """BM25 indexes a basic repo and returns ranked results."""
+        repo_map = scan_repo_lightweight(self.tmpdir)
+        bm25 = BM25Index()
+        bm25.index_repo(repo_map)
+        self.assertTrue(bm25.corpus_indexed)
+        self.assertGreater(bm25.doc_count, 0)
+
+    def test_query_returns_ranked(self):
+        """BM25 query returns results sorted by score (descending)."""
+        repo_map = scan_repo_lightweight(self.tmpdir)
+        bm25 = BM25Index()
+        bm25.index_repo(repo_map)
+        results = bm25.query("auth login user")
+        if results:
+            scores = [s for _, s in results]
+            self.assertEqual(scores, sorted(scores, reverse=True))
+
+    def test_relevant_file_scores_higher(self):
+        """File containing query terms scores higher than unrelated files."""
+        # Create a repo with clear relevance signal
+        auth_dir = os.path.join(self.tmpdir, "auth")
+        os.makedirs(auth_dir)
+        with open(os.path.join(auth_dir, "login.py"), "w") as f:
+            f.write("def authenticate_user(username, password):\n    pass\n")
+        with open(os.path.join(self.tmpdir, "utils.py"), "w") as f:
+            f.write("def format_date(d):\n    pass\n")
+
+        repo_map = scan_repo_lightweight(self.tmpdir)
+        bm25 = BM25Index()
+        bm25.index_repo(repo_map)
+        results = bm25.query("authenticate login user password")
+        self.assertGreater(len(results), 0)
+        # auth/login.py should score highest
+        top_path = results[0][0]
+        self.assertIn("auth", top_path)
+
+    def test_idf_weighing(self):
+        """Rare terms should have higher impact than common terms."""
+        # Create multiple files, "import" is common, "cryptography" is rare
+        for i in range(5):
+            with open(os.path.join(self.tmpdir, f"mod{i}.py"), "w") as f:
+                f.write(f"import os\ndef func{i}():\n    pass\n")
+        with open(os.path.join(self.tmpdir, "crypto.py"), "w") as f:
+            f.write("import os\ndef encrypt_with_cryptography():\n    pass\n")
+
+        repo_map = scan_repo_lightweight(self.tmpdir)
+        bm25 = BM25Index()
+        bm25.index_repo(repo_map)
+
+        results = bm25.query("cryptography encrypt")
+        self.assertGreater(len(results), 0)
+        self.assertIn("crypto.py", results[0][0])
+
+    def test_top_k_limit(self):
+        """Query respects top_k parameter."""
+        repo_map = scan_repo_lightweight(self.tmpdir)
+        bm25 = BM25Index()
+        bm25.index_repo(repo_map)
+        results = bm25.query("auth", top_k=3)
+        self.assertLessEqual(len(results), 3)
+
+    def test_camelcase_tokenization(self):
+        """BM25 splits camelCase terms correctly."""
+        bm25 = BM25Index()
+        parts = bm25._split_camel("getUserById")
+        self.assertIn("get", parts)
+        self.assertIn("user", parts)
+
+    def test_query_with_no_matches(self):
+        """Query with completely unrelated terms returns empty."""
+        with open(os.path.join(self.tmpdir, "hello.py"), "w") as f:
+            f.write("def greet():\n    print('hello')\n")
+        repo_map = scan_repo_lightweight(self.tmpdir)
+        bm25 = BM25Index()
+        bm25.index_repo(repo_map)
+        results = bm25.query("xyzzyplugh completely unrelated quantum")
+        # May return 0 or very low scores
+        if results:
+            self.assertLess(results[0][1], 1.0)
+
+    def test_bm25_parameters(self):
+        """Custom k1 and b parameters work."""
+        bm25 = BM25Index(k1=2.0, b=0.5)
+        self.assertEqual(bm25.k1, 2.0)
+        self.assertEqual(bm25.b, 0.5)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LLM Integration Tests (mock-based — no real API calls)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestLLMIntegration(unittest.TestCase):
+    """Test LLM integration with mocked API responses."""
+
+    def setUp(self):
+        """Reset LLM method cache between tests."""
+        import tokenscout_llm
+        tokenscout_llm._llm_method = None
+
+    def _no_llm_env(self):
+        """Context manager that disables both OAuth and API key."""
+        return patch.multiple(
+            "tokenscout_llm",
+            _llm_method=None,
+        )
+
+    def test_llm_not_available_without_key_or_cli(self):
+        """is_llm_available returns False without API key or claude CLI."""
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}, clear=False), \
+             patch("shutil.which", return_value=None):
+            import tokenscout_llm
+            tokenscout_llm._llm_method = None  # reset cache
+            self.assertFalse(is_llm_available())
+
+    def test_llm_available_with_key(self):
+        """is_llm_available returns True with API key."""
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test-key"}, clear=False), \
+             patch("shutil.which", return_value=None):
+            import tokenscout_llm
+            tokenscout_llm._llm_method = None
+            self.assertTrue(is_llm_available())
+
+    def test_llm_available_with_oauth_cli(self):
+        """is_llm_available returns True when claude CLI is available."""
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}, clear=False), \
+             patch("shutil.which", return_value="/usr/local/bin/claude"):
+            import tokenscout_llm
+            tokenscout_llm._llm_method = None
+            self.assertTrue(is_llm_available())
+
+    def test_oauth_preferred_over_api_key(self):
+        """OAuth (claude CLI) is preferred when both are available."""
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}, clear=False), \
+             patch("shutil.which", return_value="/usr/local/bin/claude"):
+            import tokenscout_llm
+            tokenscout_llm._llm_method = None
+            method = tokenscout_llm._detect_llm_method()
+            self.assertEqual(method, "oauth")
+
+    def test_api_key_fallback_when_no_cli(self):
+        """Falls back to API key when claude CLI is not available."""
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}, clear=False), \
+             patch("shutil.which", return_value=None):
+            import tokenscout_llm
+            tokenscout_llm._llm_method = None
+            method = tokenscout_llm._detect_llm_method()
+            self.assertEqual(method, "api_key")
+
+    def test_augment_query_no_llm(self):
+        """augment_query returns empty results without any LLM method."""
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}, clear=False), \
+             patch("shutil.which", return_value=None):
+            import tokenscout_llm
+            tokenscout_llm._llm_method = None
+            result = augment_query("find auth bug", "repo summary", [])
+            self.assertEqual(result["expanded_terms"], [])
+            self.assertIsNone(result["D_q"])
+            self.assertIsNone(result["intent"])
+
+    def test_assess_confidence_no_llm(self):
+        """assess_confidence returns None values without any LLM method."""
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}, clear=False), \
+             patch("shutil.which", return_value=None):
+            import tokenscout_llm
+            tokenscout_llm._llm_method = None
+            result = assess_confidence(
+                "find bug", ["auth.py"], ["Auth.login"], ["db.py"], 30.0, 40.0
+            )
+            self.assertIsNone(result["kappa_estimate"])
+            self.assertIsNone(result["should_continue"])
+
+    def test_semantic_rank_no_llm(self):
+        """semantic_rank_candidates falls back to original scores without LLM."""
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}, clear=False), \
+             patch("shutil.which", return_value=None):
+            import tokenscout_llm
+            tokenscout_llm._llm_method = None
+            candidates = {
+                "auth.py": {"score": 0.8},
+                "db.py": {"score": 0.5},
+            }
+            result = semantic_rank_candidates("find auth", candidates, {})
+            self.assertEqual(len(result), 2)
+            scores_dict = dict(result)
+            self.assertEqual(scores_dict["auth.py"], 0.8)
+
+    @patch("tokenscout_llm._call_haiku")
+    def test_augment_query_with_mock(self, mock_haiku):
+        """augment_query parses LLM response correctly."""
+        mock_haiku.return_value = json.dumps({
+            "expanded_terms": ["authentication", "session", "token", "jwt"],
+            "D_q": 65,
+            "intent": "bug_fix",
+            "strategy": "Check auth middleware first, then session handler"
+        })
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}, clear=False), \
+             patch("shutil.which", return_value="/usr/local/bin/claude"):
+            import tokenscout_llm
+            tokenscout_llm._llm_method = None
+            result = augment_query("find auth bug", "repo summary", ["auth.py"])
+            self.assertEqual(result["D_q"], 65)
+            self.assertEqual(result["intent"], "bug_fix")
+            self.assertIn("authentication", result["expanded_terms"])
+            self.assertIn("jwt", result["expanded_terms"])
+
+    @patch("tokenscout_llm._call_haiku")
+    def test_assess_confidence_with_mock(self, mock_haiku):
+        """assess_confidence parses LLM response correctly."""
+        mock_haiku.return_value = json.dumps({
+            "kappa_estimate": 75,
+            "reasoning": "Key auth files explored, only tests remaining",
+            "should_continue": False,
+            "next_targets": ["test_auth.py"]
+        })
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}, clear=False), \
+             patch("shutil.which", return_value="/usr/local/bin/claude"):
+            import tokenscout_llm
+            tokenscout_llm._llm_method = None
+            result = assess_confidence(
+                "find auth bug", ["auth.py", "middleware.py"],
+                ["Auth.login", "Middleware.check"], ["test_auth.py"], 50.0, 60.0
+            )
+            self.assertEqual(result["kappa_estimate"], 75)
+            self.assertFalse(result["should_continue"])
+            self.assertIn("test_auth.py", result["next_targets"])
+
+    @patch("tokenscout_llm._call_haiku")
+    def test_semantic_rank_with_mock(self, mock_haiku):
+        """semantic_rank_candidates uses LLM rankings."""
+        mock_haiku.return_value = json.dumps([
+            {"path": "auth.py", "score": 0.95, "reason": "directly handles auth"},
+            {"path": "db.py", "score": 0.3, "reason": "general database"},
+        ])
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}, clear=False), \
+             patch("shutil.which", return_value="/usr/local/bin/claude"):
+            import tokenscout_llm
+            tokenscout_llm._llm_method = None
+            candidates = {
+                "auth.py": {"score": 0.6},
+                "db.py": {"score": 0.7},
+            }
+            result = semantic_rank_candidates("find auth bug", candidates, {})
+            scores = dict(result)
+            self.assertGreater(scores["auth.py"], scores["db.py"])
+
+    @patch("tokenscout_llm._call_haiku")
+    def test_augment_handles_malformed_response(self, mock_haiku):
+        """augment_query handles malformed LLM response gracefully."""
+        mock_haiku.return_value = "this is not json at all"
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}, clear=False), \
+             patch("shutil.which", return_value="/usr/local/bin/claude"):
+            import tokenscout_llm
+            tokenscout_llm._llm_method = None
+            result = augment_query("test query", "summary", [])
+            self.assertEqual(result["expanded_terms"], [])
+            self.assertIsNone(result["D_q"])
+
+    @patch("tokenscout_llm._call_haiku")
+    def test_augment_handles_markdown_wrapped_json(self, mock_haiku):
+        """augment_query handles markdown-wrapped JSON response."""
+        mock_haiku.return_value = '```json\n{"expanded_terms": ["test"], "D_q": 40, "intent": "testing", "strategy": "run tests"}\n```'
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}, clear=False), \
+             patch("shutil.which", return_value="/usr/local/bin/claude"):
+            import tokenscout_llm
+            tokenscout_llm._llm_method = None
+            result = augment_query("test query", "summary", [])
+            self.assertEqual(result["D_q"], 40)
+            self.assertIn("test", result["expanded_terms"])
+
+    @patch("tokenscout_llm._call_haiku")
+    def test_augment_caps_dq_at_100(self, mock_haiku):
+        """augment_query caps D_q at 100."""
+        mock_haiku.return_value = json.dumps({
+            "expanded_terms": [], "D_q": 999, "intent": "test", "strategy": ""
+        })
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}, clear=False), \
+             patch("shutil.which", return_value="/usr/local/bin/claude"):
+            import tokenscout_llm
+            tokenscout_llm._llm_method = None
+            result = augment_query("test", "summary", [])
+            self.assertEqual(result["D_q"], 100)
+
+    @patch("tokenscout_llm._call_haiku")
+    def test_haiku_call_failure_graceful(self, mock_haiku):
+        """LLM failure falls back gracefully."""
+        mock_haiku.return_value = None  # simulate failure
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}, clear=False), \
+             patch("shutil.which", return_value="/usr/local/bin/claude"):
+            import tokenscout_llm
+            tokenscout_llm._llm_method = None
+            result = augment_query("test", "summary", [])
+            self.assertEqual(result["expanded_terms"], [])
+
+    @patch("tokenscout_llm.subprocess.run")
+    def test_oauth_call_success(self, mock_run):
+        """OAuth call via claude -p returns response correctly."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["claude", "-p"], returncode=0,
+            stdout='{"expanded_terms": ["auth"], "D_q": 50, "intent": "bug_fix", "strategy": "check auth"}',
+            stderr="",
+        )
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}, clear=False), \
+             patch("shutil.which", return_value="/usr/local/bin/claude"):
+            import tokenscout_llm
+            tokenscout_llm._llm_method = None
+            result = tokenscout_llm._call_haiku_oauth("system", "user msg", 200)
+            self.assertIsNotNone(result)
+            self.assertIn("expanded_terms", result)
+
+    @patch("tokenscout_llm.subprocess.run")
+    def test_oauth_call_timeout(self, mock_run):
+        """OAuth call handles timeout gracefully."""
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=15)
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}, clear=False), \
+             patch("shutil.which", return_value="/usr/local/bin/claude"):
+            import tokenscout_llm
+            tokenscout_llm._llm_method = None
+            result = tokenscout_llm._call_haiku_oauth("system", "user msg", 200)
+            self.assertIsNone(result)
+
+
+class TestBuildHelpers(unittest.TestCase):
+    """Test LLM helper functions."""
+
+    def test_build_repo_summary(self):
+        """build_repo_summary produces readable text."""
+        repo_map = {
+            "files": {
+                "auth/login.py": {"lang": "python", "lines": 100, "signatures": []},
+                "db/models.py": {"lang": "python", "lines": 200, "signatures": []},
+            },
+            "symbols": {
+                "auth/login.py::AuthService": {"type": "class", "path": "auth/login.py", "line": 1},
+            },
+            "stats": {"total_files": 2, "total_lines": 300, "languages": {"python": 2}},
+            "dependencies": {},
+        }
+        summary = build_repo_summary(repo_map)
+        self.assertIn("Files: 2", summary)
+        self.assertIn("Lines: 300", summary)
+        self.assertIn("AuthService", summary)
+
+    def test_build_file_summaries(self):
+        """build_file_summaries creates per-file descriptions."""
+        repo_map = {
+            "files": {
+                "auth.py": {
+                    "lang": "python", "lines": 50,
+                    "signatures": [{"name": "login", "type": "function"}],
+                },
+            },
+        }
+        summaries = build_file_summaries(repo_map)
+        self.assertIn("auth.py", summaries)
+        self.assertIn("login", summaries["auth.py"])
+
+    def test_build_file_summaries_no_sigs(self):
+        """Files without signatures still get a summary."""
+        repo_map = {
+            "files": {"config.py": {"lang": "python", "lines": 10, "signatures": []}},
+        }
+        summaries = build_file_summaries(repo_map)
+        self.assertIn("config.py", summaries)
+        self.assertIn("python", summaries["config.py"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
