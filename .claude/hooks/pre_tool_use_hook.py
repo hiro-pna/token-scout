@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tokenscout_common import (
     read_hook_input, load_state, save_state, audit_log,
     should_terminate, priority_score, compute_budget,
+    find_related_via_graphs,
 )
 
 
@@ -78,11 +79,15 @@ def main():
                     f"[TokenScout Deps] {rel_path} imports: {', '.join(deps[:8])}"
                 )
 
-            # Find related files via dependency graph
-            related = _find_related_files(rel_path, repo_map)
+            # Find related files via 3-layer graph (§3.1.3: G_dep + G_inh + G_call)
+            related = find_related_via_graphs(rel_path, repo_map)
             if related:
+                rel_summary = "; ".join(
+                    f"{p} ({info['relation']} via {info['via']})"
+                    for p, info in list(related.items())[:6]
+                )
                 context_parts.append(
-                    f"[TokenScout Related] Files connected to {rel_path}: {', '.join(related[:5])}"
+                    f"[TokenScout Graph] Related to {rel_path}: {rel_summary}"
                 )
 
             if context_parts:
@@ -138,37 +143,6 @@ def _to_relative(file_path: str) -> str:
     return file_path
 
 
-def _find_related_files(target: str, repo_map: dict) -> list:
-    """
-    Graph expansion (§3.2.2): find files connected via dependency edges.
-    Traces up to 2 hops in the dependency graph.
-    """
-    deps = repo_map.get("dependencies", {})
-    related = set()
-
-    # Forward deps: files that target imports
-    for dep in deps.get(target, []):
-        # Find which file provides this import
-        for path, file_info in repo_map.get("files", {}).items():
-            if path == target:
-                continue
-            # Check if any signature matches the import
-            for sig in file_info.get("signatures", []):
-                if dep in sig.get("name", "") or dep in path:
-                    related.add(path)
-                    break
-
-    # Reverse deps: files that import target
-    target_stem = os.path.splitext(target)[0].replace(os.sep, ".")
-    for path, path_deps in deps.items():
-        if path == target:
-            continue
-        for d in path_deps:
-            if target_stem.endswith(d) or d.endswith(target_stem.split(".")[-1]):
-                related.add(path)
-                break
-
-    return sorted(related)[:10]
 
 
 if __name__ == "__main__":

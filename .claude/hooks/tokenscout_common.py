@@ -66,7 +66,9 @@ def _default_state() -> Dict[str, Any]:
         # ── Phase 1: Repo representation ──
         "repo_map": {
             "files": {},          # path -> {type, size, lang, signatures:[]}
-            "dependencies": {},   # path -> [imported_paths]
+            "dependencies": {},   # G_dep: path -> [imported_modules]
+            "inheritance": {},    # G_inh: class -> {bases:[], subclasses:[], path}
+            "call_graph": {},     # G_call: func -> [called_funcs]
             "symbols": {},        # "module.Class.method" -> {path, line, type}
             "stats": {
                 "total_files": 0,
@@ -218,9 +220,16 @@ def scan_repo_lightweight(root: str, max_files: int = 5000) -> Dict[str, Any]:
         + 0.5 * min(n_langs / 4, 1.0)
     ))
 
+    # ── Build 3-layer graph (§3.1.3 Symbol-Aware Relation Modeling) ──
+    # G = {G_dep, G_inh, G_call}
+    inheritance = _build_inheritance_graph(files, symbols)
+    call_graph = _build_call_graph(files, symbols)
+
     return {
         "files": files,
-        "dependencies": dependencies,
+        "dependencies": dependencies,    # G_dep: import relationships
+        "inheritance": inheritance,       # G_inh: class hierarchy
+        "call_graph": call_graph,         # G_call: function invocations
         "symbols": symbols,
         "stats": {
             "total_files": n_files,
@@ -424,6 +433,336 @@ def _parse_generic_sigs(lines: List[str]) -> Tuple[List[Dict], List[str]]:
         if m:
             sigs.append({"name": m.group(1), "type": "class", "line": i + 1, "signature": stripped[:120]})
     return sigs, imports
+
+
+# ─── Graph builders (§3.1.3 Symbol-Aware Relation Modeling) ──────────────
+
+def _build_inheritance_graph(files: Dict, symbols: Dict) -> Dict[str, Any]:
+    """
+    G_inh: Maps class hierarchy — base classes and subclasses.
+    Extracts from signature patterns like:
+      Python:  class Foo(Bar, Baz):
+      JS/TS:   class Foo extends Bar
+      Java:    class Foo extends Bar implements Baz
+      Go:      (embedded structs detected from signatures)
+      Rust:    impl Trait for Struct
+    """
+    graph: Dict[str, Dict] = {}
+    # class_name -> {path, bases:[], subclasses:[]}
+
+    # Pass 1: collect all classes and their declared bases
+    for path, info in files.items():
+        for sig in info.get("signatures", []):
+            if sig.get("type") not in ("class", "struct", "interface"):
+                continue
+            name = sig["name"]
+            sig_str = sig.get("signature", "")
+            bases = _extract_bases(sig_str, info.get("lang", ""))
+
+            if name not in graph:
+                graph[name] = {"path": path, "bases": [], "subclasses": [], "line": sig.get("line", 0)}
+            graph[name]["bases"] = bases
+            graph[name]["path"] = path
+
+    # Pass 2: fill in reverse edges (subclasses)
+    for cls, info in graph.items():
+        for base in info["bases"]:
+            if base in graph:
+                if cls not in graph[base]["subclasses"]:
+                    graph[base]["subclasses"].append(cls)
+
+    return graph
+
+
+def _extract_bases(signature: str, lang: str) -> List[str]:
+    """Extract base classes/interfaces from a class signature."""
+    bases = []
+
+    if lang == "python":
+        # class Foo(Bar, Baz):
+        m = re.search(r'class\s+\w+\(([^)]+)\)', signature)
+        if m:
+            raw = m.group(1)
+            for b in raw.split(","):
+                b = b.strip().split("[")[0].split("(")[0]  # strip generics
+                if b and b not in ("object", "ABC", "metaclass="):
+                    if not b.startswith("metaclass"):
+                        bases.append(b)
+
+    elif lang in ("javascript", "typescript"):
+        # class Foo extends Bar implements Baz
+        m = re.search(r'extends\s+(\w+)', signature)
+        if m:
+            bases.append(m.group(1))
+        m = re.search(r'implements\s+([\w,\s]+)', signature)
+        if m:
+            for b in m.group(1).split(","):
+                b = b.strip()
+                if b:
+                    bases.append(b)
+
+    elif lang == "java":
+        m = re.search(r'extends\s+(\w+)', signature)
+        if m:
+            bases.append(m.group(1))
+        m = re.search(r'implements\s+([\w,\s]+)', signature)
+        if m:
+            for b in m.group(1).split(","):
+                b = b.strip()
+                if b:
+                    bases.append(b)
+
+    elif lang == "rust":
+        # impl Trait for Struct / : Trait
+        m = re.search(r':\s*([\w\s+<>]+)', signature)
+        if m:
+            for b in m.group(1).split("+"):
+                b = b.strip().split("<")[0]
+                if b:
+                    bases.append(b)
+
+    return bases
+
+
+def _build_call_graph(files: Dict, symbols: Dict) -> Dict[str, Any]:
+    """
+    G_call: Lightweight call graph — maps functions to called symbols.
+    Extracts function/method calls via regex from signatures and file structure.
+    Since we only have signatures (not full bodies), we extract calls from:
+      1. Default arguments and decorators in signatures
+      2. Known patterns (super().__init__, self.method, etc.)
+      3. Cross-reference symbols: if a function name appears in another file's signatures
+    """
+    graph: Dict[str, List[str]] = {}
+
+    # Build symbol lookup: name -> [paths]
+    symbol_lookup: Dict[str, List[str]] = {}
+    for sym_key, info in symbols.items():
+        name = sym_key.split("::")[-1] if "::" in sym_key else sym_key
+        base_name = name.split(".")[-1] if "." in name else name
+        if base_name not in symbol_lookup:
+            symbol_lookup[base_name] = []
+        symbol_lookup[base_name].append(info["path"])
+
+    # For each function/method, find likely callees
+    for path, info in files.items():
+        for sig in info.get("signatures", []):
+            if sig.get("type") not in ("function", "method"):
+                continue
+
+            caller_key = f"{path}::{sig['name']}"
+            callees = set()
+
+            sig_str = sig.get("signature", "")
+
+            # Extract function calls from signatures (defaults, decorators, type hints)
+            calls_in_sig = re.findall(r'(\w+)\s*\(', sig_str)
+            for call in calls_in_sig:
+                if call in ("def", "async", "return", "if", "for", "while", "print",
+                            "len", "str", "int", "float", "bool", "list", "dict",
+                            "set", "tuple", "range", "type", "super", "self"):
+                    continue
+                if call in symbol_lookup:
+                    for callee_path in symbol_lookup[call]:
+                        if callee_path != path:  # cross-file calls are most interesting
+                            callees.add(f"{callee_path}::{call}")
+
+            # For methods: check if class has known base → likely calls super methods
+            if sig.get("type") == "method" and "." in sig["name"]:
+                cls_name = sig["name"].split(".")[0]
+                method_name = sig["name"].split(".")[-1]
+                # Check if same method exists in other classes (potential override/call)
+                if method_name in symbol_lookup:
+                    for callee_path in symbol_lookup[method_name]:
+                        if callee_path != path:
+                            callees.add(f"{callee_path}::{method_name}")
+
+            if callees:
+                graph[caller_key] = sorted(callees)[:10]  # cap per function
+
+    return graph
+
+
+def find_related_via_graphs(target_path: str, repo_map: Dict, max_hops: int = 2) -> Dict[str, Dict]:
+    """
+    Graph expansion (§3.2.2): find files connected via ALL 3 graph layers.
+    Returns {path: {relation_type, distance, via}} for related files.
+
+    Traces:
+      G_dep: import dependencies (forward + reverse)
+      G_inh: inheritance hierarchy (superclasses + subclasses)
+      G_call: function call targets and callers
+    """
+    related: Dict[str, Dict] = {}
+    deps = repo_map.get("dependencies", {})
+    inheritance = repo_map.get("inheritance", {})
+    call_graph = repo_map.get("call_graph", {})
+    files = repo_map.get("files", {})
+    symbols = repo_map.get("symbols", {})
+
+    # ── G_dep: dependency layer ──
+    # Forward: files that target imports
+    for dep in deps.get(target_path, []):
+        for path in files:
+            if path == target_path:
+                continue
+            if dep in path or any(dep in s.get("name", "") for s in files[path].get("signatures", [])):
+                if path not in related:
+                    related[path] = {"relation": "imports", "distance": 1, "via": dep}
+
+    # Reverse: files that import target
+    target_stem = os.path.splitext(target_path)[0].replace(os.sep, ".")
+    target_name = os.path.splitext(os.path.basename(target_path))[0]
+    for path, path_deps in deps.items():
+        if path == target_path:
+            continue
+        for d in path_deps:
+            if target_name == d or target_stem.endswith(d) or d.endswith(target_name):
+                if path not in related:
+                    related[path] = {"relation": "imported_by", "distance": 1, "via": d}
+                break
+
+    # ── G_inh: inheritance layer ──
+    # Find classes defined in target_path
+    target_classes = set()
+    for sig in files.get(target_path, {}).get("signatures", []):
+        if sig.get("type") in ("class", "struct", "interface"):
+            target_classes.add(sig["name"])
+
+    for cls_name in target_classes:
+        cls_info = inheritance.get(cls_name, {})
+        # Superclasses
+        for base in cls_info.get("bases", []):
+            base_info = inheritance.get(base, {})
+            base_path = base_info.get("path", "")
+            if base_path and base_path != target_path and base_path not in related:
+                related[base_path] = {"relation": "superclass", "distance": 1, "via": f"{cls_name} extends {base}"}
+        # Subclasses
+        for sub in cls_info.get("subclasses", []):
+            sub_info = inheritance.get(sub, {})
+            sub_path = sub_info.get("path", "")
+            if sub_path and sub_path != target_path and sub_path not in related:
+                related[sub_path] = {"relation": "subclass", "distance": 1, "via": f"{sub} extends {cls_name}"}
+
+    # ── G_call: call graph layer ──
+    # Functions in target that call things in other files
+    for sym_key, callees in call_graph.items():
+        caller_path = sym_key.split("::")[0] if "::" in sym_key else ""
+        if caller_path == target_path:
+            for callee_key in callees:
+                callee_path = callee_key.split("::")[0] if "::" in callee_key else ""
+                if callee_path and callee_path != target_path and callee_path not in related:
+                    related[callee_path] = {"relation": "calls", "distance": 1, "via": callee_key.split("::")[-1]}
+
+    # Reverse: functions in other files that call things in target
+    target_funcs = set()
+    for sig in files.get(target_path, {}).get("signatures", []):
+        if sig.get("type") in ("function", "method"):
+            target_funcs.add(sig["name"].split(".")[-1])
+
+    for sym_key, callees in call_graph.items():
+        caller_path = sym_key.split("::")[0] if "::" in sym_key else ""
+        if caller_path == target_path:
+            continue
+        for callee_key in callees:
+            callee_name = callee_key.split("::")[-1] if "::" in callee_key else callee_key
+            callee_base = callee_name.split(".")[-1] if "." in callee_name else callee_name
+            callee_path = callee_key.split("::")[0] if "::" in callee_key else ""
+            if callee_path == target_path or callee_base in target_funcs or callee_name in target_funcs:
+                # Upgrade relation if already present from weaker layer (imports → called_by)
+                if caller_path not in related or related[caller_path]["relation"] in ("imports", "imported_by"):
+                    related[caller_path] = {"relation": "called_by", "distance": 1, "via": callee_name}
+
+    # Sort by relevance: inheritance > calls > imports
+    priority = {"superclass": 0, "subclass": 0, "calls": 1, "called_by": 1,
+                "imports": 2, "imported_by": 2}
+    return dict(sorted(related.items(), key=lambda x: priority.get(x[1]["relation"], 3))[:15])
+
+
+# ─── Confidence estimation (§3.3.1) ─────────────────────────────────────────
+
+def estimate_confidence_boost(
+    file_path: str,
+    state: Dict[str, Any],
+    tool_name: str = "Read",
+    tool_input: Optional[Dict] = None,
+) -> float:
+    """
+    Improved epistemic confidence update based on multiple signals.
+    More nuanced than flat heuristic — considers:
+      1. Whether file was a scouting candidate (and its score)
+      2. Coverage: what fraction of candidates have been explored
+      3. Graph centrality: files with more connections are more informative
+      4. Diminishing returns: each successive file adds less confidence
+    """
+    candidates = state.get("candidates", {})
+    explored = state.get("explored_files", [])
+    repo_map = state.get("repo_map", {})
+    ctx = state.get("context_state", {})
+
+    if tool_name == "Read":
+        rel_path = file_path
+        base_boost = 5.0  # default for unknown files
+
+        # Signal 1: candidate score (0-1) → bigger boost for higher-scored files
+        if rel_path in candidates:
+            score = candidates[rel_path].get("score", 0.5)
+            base_boost = 8.0 + score * 12.0  # range: 8-20
+
+        # Signal 2: graph centrality — files connected to many others are more informative
+        inh = repo_map.get("inheritance", {})
+        call = repo_map.get("call_graph", {})
+        deps = repo_map.get("dependencies", {})
+        connections = 0
+        connections += len(deps.get(rel_path, []))
+        # Count how many call graph entries reference this file
+        for key in call:
+            if key.startswith(rel_path + "::"):
+                connections += len(call[key])
+        # Inheritance connections
+        for cls, info in inh.items():
+            if info.get("path") == rel_path:
+                connections += len(info.get("bases", [])) + len(info.get("subclasses", []))
+        centrality_bonus = min(5.0, connections * 0.5)
+        base_boost += centrality_bonus
+
+        # Signal 3: diminishing returns — each file adds less
+        n_explored = len(explored)
+        diminish_factor = 1.0 / (1.0 + n_explored * 0.15)
+        base_boost *= diminish_factor
+
+        # Signal 4: coverage boost — exploring a larger fraction of candidates
+        if candidates:
+            explored_set = set(explored)
+            coverage = len(explored_set & set(candidates.keys())) / len(candidates)
+            if coverage > 0.8:
+                base_boost += 5.0  # explored most candidates → high confidence
+            elif coverage > 0.5:
+                base_boost += 2.0
+
+        # Signal 5: re-read penalty
+        if rel_path in explored:
+            base_boost = max(0.5, base_boost * 0.1)  # re-read is almost no new info
+
+        return round(min(25.0, base_boost), 2)
+
+    elif tool_name == "Grep":
+        # Grep narrows search — moderate boost, scales down with iteration
+        n = ctx.get("t", 0)
+        return round(max(1.0, 5.0 / (1 + n * 0.1)), 2)
+
+    elif tool_name == "Glob":
+        return 1.0
+
+    elif tool_name == "Bash":
+        command = (tool_input or {}).get("command", "")
+        if any(kw in command for kw in ["test", "pytest", "jest", "cargo test", "go test"]):
+            return 10.0  # running tests = high confidence signal
+        elif any(kw in command for kw in ["grep", "find", "rg", "ag", "fd"]):
+            return 3.0
+        return 2.0
+
+    return 1.0
 
 
 # ─── Cost-aware helpers (§3.3) ────────────────────────────────────────────────

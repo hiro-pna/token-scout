@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tokenscout_common import (
     read_hook_input, load_state, save_state, audit_log,
     information_gain_rate, should_terminate, compute_budget,
+    estimate_confidence_boost,
 )
 
 
@@ -39,9 +40,9 @@ def main():
     kappa_prev = ctx["kappa_t"]
     ctx["L_t"] += lines_consumed
 
-    # ── Update epistemic confidence κ_t ──
-    # Heuristic: confidence grows with each relevant file read,
-    # but with diminishing returns
+    # ── Update epistemic confidence κ_t (§3.3.1) ──
+    # Multi-signal confidence estimation: candidate score, graph centrality,
+    # diminishing returns, coverage fraction
     if tool_name == "Read":
         file_path = tool_input.get("file_path", "")
         rel_path = _to_relative(file_path)
@@ -50,36 +51,12 @@ def main():
         if rel_path not in state["explored_files"]:
             state["explored_files"].append(rel_path)
 
-            # Confidence boost based on file relevance
-            # Files in the scouting candidates list get a bigger boost
-            if rel_path in state.get("candidates", {}):
-                score = state["candidates"][rel_path].get("score", 0.5)
-                boost = min(15, score * 20)
-            else:
-                boost = 5  # Unknown file, smaller boost
+        boost = estimate_confidence_boost(rel_path, state, tool_name, tool_input)
+        ctx["kappa_t"] = min(100, ctx["kappa_t"] + boost)
 
-            ctx["kappa_t"] = min(100, ctx["kappa_t"] + boost)
-        else:
-            # Re-reading a file: tiny boost (might be for specific section)
-            ctx["kappa_t"] = min(100, ctx["kappa_t"] + 1)
-
-    elif tool_name == "Grep":
-        # Grep results help narrow search — moderate confidence boost
-        ctx["kappa_t"] = min(100, ctx["kappa_t"] + 3)
-
-    elif tool_name == "Glob":
-        # Glob is pure scouting — small boost
-        ctx["kappa_t"] = min(100, ctx["kappa_t"] + 1)
-
-    elif tool_name == "Bash":
-        # Bash commands (tests, builds) — varies
-        command = tool_input.get("command", "")
-        if any(kw in command for kw in ["test", "pytest", "jest", "cargo test", "go test"]):
-            ctx["kappa_t"] = min(100, ctx["kappa_t"] + 10)
-        elif any(kw in command for kw in ["grep", "find", "rg", "ag", "fd"]):
-            ctx["kappa_t"] = min(100, ctx["kappa_t"] + 3)
-        else:
-            ctx["kappa_t"] = min(100, ctx["kappa_t"] + 2)
+    elif tool_name in ("Grep", "Glob", "Bash"):
+        boost = estimate_confidence_boost("", state, tool_name, tool_input)
+        ctx["kappa_t"] = min(100, ctx["kappa_t"] + boost)
 
     # ── Compute IGR ──
     igr = information_gain_rate(ctx["kappa_t"], kappa_prev, ctx["L_t"], L_prev)

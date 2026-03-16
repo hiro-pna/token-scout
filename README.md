@@ -59,7 +59,7 @@ Without TokenScout, Claude Code explores your repo like a tourist without a map:
 
 ```bash
 # 1. Clone
-git clone https://github.com/YOUR_USERNAME/token-scout.git
+git clone https://github.com/user/token-scout.git
 
 # 2. Copy hooks to your project
 cp -r token-scout/.claude your-project/.claude
@@ -210,10 +210,25 @@ your-project/
         ├── stop_hook.py              # Phase 3: confidence-gated stopping
         ├── stop_hook.sh
         ├── test_tokenscout_hooks.py  # 51 unit + integration tests
-        └── benchmark_token_savings.py # 12 benchmark tests + visual reports
+        ├── benchmark_token_savings.py # 12 benchmark tests + visual reports
+        └── realworld_benchmark.py    # Real-world session analyzer
 ```
 
 **Why so few files?** By design. FastCode is a full framework (web UI, CLI, REST API, Docker, MCP server). TokenScout is **pure Claude Code hooks** — it drops into any project's `.claude/` directory and works immediately. No server, no config, no dependencies. That's the point.
+
+### Three Graph Layers (§3.1.3)
+
+TokenScout builds a multi-layer relationship graph during the initial scan:
+
+```
+G = { G_dep, G_inh, G_call }
+
+G_dep (Dependencies):   auth/login.py ──imports──▶ db/models.py
+G_inh (Inheritance):    AdminUser ──extends──▶ BaseUser
+G_call (Call Graph):    validate() ──calls──▶ hash_password()
+```
+
+When Claude reads a file, TokenScout uses **all three layers** to suggest related files — not just imports, but also superclasses, subclasses, callers, and callees.
 
 ---
 
@@ -288,6 +303,48 @@ This project implements the **scouting-first code reasoning** paradigm from acad
 3. **Cost-Aware Context Management** — track and budget token consumption dynamically
 
 > The original research demonstrated 4.7× speedup and 74% cost reduction on real-world codebases. TokenScout brings this paradigm to Claude Code as a zero-config hook system.
+
+---
+
+## 📏 Measure Real Savings
+
+The built-in benchmarks use simulated repos. To measure **actual** savings on your codebase:
+
+```bash
+# After a Claude Code session with TokenScout, analyze the audit log:
+python3 .claude/hooks/realworld_benchmark.py
+
+# Compare before/after (run same task twice: without hooks, then with):
+python3 .claude/hooks/realworld_benchmark.py --compare before.jsonl after.jsonl
+
+# JSON output for programmatic use:
+python3 .claude/hooks/realworld_benchmark.py --json
+```
+
+The analyzer shows: files read, lines consumed, confidence trajectory, IGR curve, budget utilization, and wasteful reads (reads that happened after diminishing returns were detected).
+
+---
+
+## 🔬 Differences from FastCode
+
+TokenScout is inspired by the [FastCode paper](https://arxiv.org/abs/2603.01012) but is **not a full reimplementation**. Here's what we implement and what we don't:
+
+| FastCode Feature | TokenScout | Notes |
+|---|---|---|
+| 3-phase architecture (Map → Scout → Budget) | ✅ Full | Mapped to 5 Claude Code hooks |
+| State vector S_t = {D_q, H_r, L_t, t, κ_t} | ✅ Full | All 5 components tracked |
+| IGR formula + 3 termination conditions | ✅ Full | Exact formulas from paper |
+| Priority score P(u) = w1·Rel + w2·𝟙_tool + w3·Density | ✅ Full | Equation 2 from paper |
+| Dynamic budget B ∝ D_q · H_r | ✅ Full | Scaled to practical line counts |
+| G_dep (dependency graph) | ✅ Full | Import-based, forward + reverse |
+| G_inh (inheritance graph) | ✅ Regex-based | Extracts extends/implements across 7+ languages |
+| G_call (call graph) | ✅ Lightweight | Cross-file symbol resolution via regex |
+| Tree-sitter AST parsing | ❌ | Uses regex — no external deps, ~80% accuracy |
+| BM25 + embedding hybrid indexing | ❌ | Keyword matching only — no embedding model |
+| LLM-powered query augmentation | ❌ | Hooks can't call LLM API — uses heuristics |
+| LLM-based confidence (κ) self-assessment | ❌ | Multi-signal heuristic instead |
+
+**Why the gaps?** FastCode is a standalone framework with its own server, embedding model, and LLM API access. TokenScout runs as Claude Code hooks — it must execute in milliseconds, with zero dependencies, and no API calls. Features requiring LLM inference or GPU-based embeddings are fundamentally incompatible with the hooks architecture.
 
 ---
 
