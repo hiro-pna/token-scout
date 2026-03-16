@@ -1,0 +1,1 @@
+__pycache__/\n*.pyc\n.DS_Store\n.pytest_cache/\n*.egg-info/\ndist/\nbuild/\n.claude/hooks/tokenscout_state.json\n.claude/hooks/tokenscout_audit.jsonl
