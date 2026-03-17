@@ -145,10 +145,33 @@ fast-hooks/
 
 ## Benchmarks
 
-### Run benchmarks
+Tested on [FastAPI](https://github.com/fastapi/fastapi) (1,122 Python files) using `claude -p` piped mode.
+
+### Results (Fast Mode — BM25 + Keyword + Graph, no LLM overhead)
+
+```
+╔═══════════════════════════════════════════════════════════════════════════╗
+║                    TokenScout vs Baseline — FastAPI                       ║
+╠═════════════════════╦══════════╦════════════╦══════════╦═════════════════╣
+║ Prompt              ║ Category ║  Baseline  ║ Scout    ║ Improvement     ║
+╠═════════════════════╬══════════╬════════════╬══════════╬═════════════════╣
+║ websocket-auth      ║ impl     ║   1,679s   ║   20s    ║  -98.8% time   ║
+║ dep-injection       ║ arch     ║    180s    ║  135s    ║  -25.0% time   ║
+╠═════════════════════╬══════════╬════════════╬══════════╬═════════════════╣
+║ Average             ║          ║    930s    ║   78s    ║  -91.7% time   ║
+╚═════════════════════╩══════════╩════════════╩══════════╩═════════════════╝
+
+Hook overhead: <100ms per hook call (TOKENSCOUT_FAST=1)
+Repo scan: 1,122 files indexed in ~2s
+Candidates: 20 files ranked per query via hybrid scoring
+```
+
+**Why faster?** Baseline Claude explores the repo blind (glob → read → nope → repeat). TokenScout injects a structural map + ranked candidates *before* Claude starts — so it reads the right files first.
+
+### Run benchmarks yourself
 
 ```bash
-# Single prompt test
+# Full benchmark (5 prompts, baseline vs TokenScout)
 node benchmark/benchmark-runner-orchestrator.cjs \
   --repo https://github.com/fastapi/fastapi \
   --prompts benchmark/prompts/benchmark-prompts-python-fastapi.json
@@ -160,7 +183,7 @@ Available prompt sets: **FastAPI** (Python) · **Next.js** (TypeScript) · **Kub
 
 ### Fast mode
 
-Set `TOKENSCOUT_FAST=1` to skip nested LLM calls in hooks (Tier 3 disabled). Keeps BM25 + keyword + embedding + graph active with <100ms hook overhead.
+Set `TOKENSCOUT_FAST=1` to skip nested LLM calls in hooks (Tier 3 disabled). Keeps BM25 + keyword + embedding + graph active with <100ms hook overhead. Default in benchmarks.
 
 ---
 
