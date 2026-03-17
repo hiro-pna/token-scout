@@ -23,7 +23,7 @@ const { generateReport } = require('./benchmark-report-generator-html-and-json.c
 const SCRIPT_DIR = path.resolve(__dirname);
 const REPO_ROOT = path.resolve(SCRIPT_DIR, '..');
 const INSTALL_SH = path.join(REPO_ROOT, 'install.sh');
-const PROMPT_TIMEOUT_MS = 180000; // 3 minutes to accommodate hook LLM calls
+const PROMPT_TIMEOUT_MS = 300000; // 5 minutes for complex multi-file queries
 
 // ── CLI arg parsing ───────────────────────────────────────────────────────────
 
@@ -108,6 +108,15 @@ function runPrompt(promptObj, baselineDir, tokenscoutDir) {
   const tsRun = runClaudePrompt(prompt, tokenscoutDir);
   const tsMetrics = collectMetrics(auditLogPath(tokenscoutDir));
   const tsBaseMetrics = collectBaselineMetrics(tsRun.stdout);
+
+  // Quick summary
+  log(`  [${id}] Baseline: ${baselineMetrics.total_tokens} tokens, $${baselineMetrics.cost_usd}, ${baselineRun.wallTimeMs}ms`);
+  log(`  [${id}] TokenScout: ${tsBaseMetrics.total_tokens} tokens, $${tsBaseMetrics.cost_usd}, ${tsRun.wallTimeMs}ms`);
+  const tokenSaving = baselineMetrics.total_tokens > 0
+    ? ((1 - tsBaseMetrics.total_tokens / baselineMetrics.total_tokens) * 100).toFixed(1) : 'N/A';
+  const costSaving = baselineMetrics.cost_usd > 0
+    ? ((1 - tsBaseMetrics.cost_usd / baselineMetrics.cost_usd) * 100).toFixed(1) : 'N/A';
+  log(`  [${id}] Savings: ${tokenSaving}% tokens, ${costSaving}% cost`);
 
   log(`  [${id}] Scoring quality...`);
   const baselineText = extractResponseText(baselineRun.stdout);
