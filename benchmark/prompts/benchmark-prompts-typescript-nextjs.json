@@ -1,0 +1,31 @@
+{
+  "repo": "https://github.com/vercel/next.js",
+  "language": "typescript",
+  "prompts": [
+    {
+      "id": "rendering-pipeline",
+      "prompt": "Walk through how Next.js renders a page with both Server and Client Components. Show the file dependencies from layout handling through serialization to client-side hydration.",
+      "category": "architecture"
+    },
+    {
+      "id": "data-fetching",
+      "prompt": "Trace how fetch() in a Server Component flows through the framework. Which files handle request caching, revalidation, and streaming to the client?",
+      "category": "flow"
+    },
+    {
+      "id": "middleware-system",
+      "prompt": "Explain how Next.js middleware works. Which files in the build system detect and process middleware.ts? How do plugins hook into the build pipeline?",
+      "category": "feature"
+    },
+    {
+      "id": "dynamic-routes",
+      "prompt": "For a dynamic route [id].tsx, trace the static generation vs dynamic rendering decision. Which build files handle this and how do they interact with server at runtime?",
+      "category": "implementation"
+    },
+    {
+      "id": "hmr-system",
+      "prompt": "How does Next.js implement Hot Module Replacement during development? Map the files involved in detecting changes, bundling updates, and pushing them to the client.",
+      "category": "flow"
+    }
+  ]
+}

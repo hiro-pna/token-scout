@@ -1,0 +1,31 @@
+{
+  "repo": "https://github.com/fastapi/fastapi",
+  "language": "python",
+  "prompts": [
+    {
+      "id": "dep-injection",
+      "prompt": "How does FastAPI's dependency injection system work? Trace the code path from route definition to dependency resolution.",
+      "category": "architecture"
+    },
+    {
+      "id": "openapi-gen",
+      "prompt": "How does FastAPI generate the OpenAPI schema? What files are involved?",
+      "category": "feature"
+    },
+    {
+      "id": "websocket-auth",
+      "prompt": "How would I add authentication to WebSocket endpoints in FastAPI?",
+      "category": "implementation"
+    },
+    {
+      "id": "pydantic-validation",
+      "prompt": "How does request body validation work with Pydantic models in FastAPI?",
+      "category": "integration"
+    },
+    {
+      "id": "middleware-chain",
+      "prompt": "Trace how middleware is applied to requests in FastAPI. What's the execution order?",
+      "category": "flow"
+    }
+  ]
+}

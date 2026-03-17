@@ -1,1 +1,53 @@
-__pycache__/\n*.pyc\n.DS_Store\n.pytest_cache/\n*.egg-info/\ndist/\nbuild/\n.claude/hooks/tokenscout_state.json\n.claude/hooks/tokenscout_audit.jsonl
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# OS
+.DS_Store
+
+# TokenScout state (generated at runtime)
+.claude/.tokenscout/
+.claude/hooks/tokenscout_state.json
+.claude/hooks/tokenscout_audit.jsonl
+
+# Secrets
+.claude/.env
+.env
+
+# Benchmark cloned repos (large, not tracked)
+benchmark/bench-baseline/
+benchmark/bench-tokenscout/
+/tmp/bench-*/
+
+# ClaudeKit local config (user-specific)
+.claude/.ck.json
+.claude/.ckignore
+.claude/metadata.json
+.mcp.json
+
+# Editor / IDE
+.idea/
+.vscode/
+
+# FastCode reference (cloned for analysis, not part of project)
+fastcode/
+
+# Plans and reports (local working files)
+plans/
+
+# Real dot claude backup
+real_dot_claude/
+
+# Legacy Python hooks (ported to CJS)
+tokenscout_claude/
+
+# Repomix
+.repomixignore
+
+# Benchmark results (machine-specific)
+benchmark/results/*.json
+benchmark/results/*.html

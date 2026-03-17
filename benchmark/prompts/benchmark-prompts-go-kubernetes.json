@@ -1,0 +1,31 @@
+{
+  "repo": "https://github.com/kubernetes/kubernetes",
+  "language": "go",
+  "prompts": [
+    {
+      "id": "pod-lifecycle",
+      "prompt": "Trace the complete lifecycle of a Pod from creation through deletion. Start at the APIServer, through the controller manager, to the Kubelet. Show all files involved.",
+      "category": "flow"
+    },
+    {
+      "id": "reconciliation-loop",
+      "prompt": "Explain Kubernetes reconciliation using a Deployment as an example. Which files implement the reconciler? How does it communicate with the APIServer?",
+      "category": "architecture"
+    },
+    {
+      "id": "apiserver-request",
+      "prompt": "A client sends a kubectl command to create a resource. Trace the request through APIServer: admission, validation, storage, and watch notifications.",
+      "category": "flow"
+    },
+    {
+      "id": "controller-design",
+      "prompt": "What interfaces and patterns would I need to implement a new controller for a custom resource? How does it integrate with the controller manager loop?",
+      "category": "implementation"
+    },
+    {
+      "id": "scheduler-decision",
+      "prompt": "Walk through how the Scheduler selects a Node for a Pod. Trace through filter and scoring plugins, and show how the decision is reported back.",
+      "category": "architecture"
+    }
+  ]
+}
