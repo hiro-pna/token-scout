@@ -113,23 +113,10 @@ function main() {
     .map(([k, v]) => `${k}(${v})`)
     .join(', ');
 
+  // Compact session context — minimize token overhead
   const lines = [
-    `[TokenScout Scouting Map] Repository: ${baseName}`,
-    `  Files: ${nFiles} | Languages: ${langStr}`,
-    `  Entropy H_r=${entropy.toFixed(2)} | Lines: ${stats.total_lines || 0}`,
+    `[TokenScout] ${baseName}: ${nFiles} files, ${langStr}. Read only ranked candidates.`,
   ];
-
-  if (topDirs.length) lines.push(`  Key dirs: ${topDirs.join(', ')}`);
-  if (topSymbols.length) lines.push(`  Key symbols: ${topSymbols.join(', ')}`);
-
-  lines.push(
-    '',
-    'TOKENSCOUT STRATEGY: Use structural scouting before reading files.',
-    '  1. Check the repo map for relevant files/symbols first',
-    '  2. Read only high-priority targets (not entire directories)',
-    '  3. Follow dependency edges for cross-file reasoning',
-    '  4. Stop when confidence is sufficient — avoid over-reading',
-  );
 
   console.log(lines.join('\n'));
 }

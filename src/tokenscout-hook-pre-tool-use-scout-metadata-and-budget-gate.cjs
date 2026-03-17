@@ -49,6 +49,11 @@ function main() {
 
   const { terminate, reason } = shouldTerminate(state);
 
+  // Skip scouting for simple queries — let Claude work naturally
+  if (ctx.D_q < 20) {
+    process.exit(0);
+  }
+
   // ── Read tool: structural scouting ──
   if (toolName === 'Read') {
     const filePath = toolInput.file_path || '';
@@ -74,30 +79,19 @@ function main() {
         );
       }
 
-      if (sigs.length > 0) {
-        const sigSummary = sigs.slice(0, 10)
-          .map(s => `${s.type} ${s.name} (L${s.line || '?'})`)
-          .join('; ');
-        contextParts.push(
-          `[TokenScout Scout] ${relPath} (${size} lines, ${fileInfo.lang || '?'}): ` +
-          `Contains: ${sigSummary}`
-        );
+      // Compact metadata — minimal tokens, maximum signal
+      const sigNames = sigs.slice(0, 5).map(s => s.name).join(', ');
+      if (sigNames) {
+        contextParts.push(`[TokenScout] ${relPath} (${size}L): ${sigNames}`);
       }
 
-      if (deps.length > 0) {
-        contextParts.push(
-          `[TokenScout Deps] ${relPath} imports: ${deps.slice(0, 8).join(', ')}`
-        );
-      }
-
-      const related = findRelatedViaGraphs(relPath, repoMap);
-      if (Object.keys(related).length > 0) {
-        const relSummary = Object.entries(related).slice(0, 6)
-          .map(([p, info]) => `${p} (${info.relation} via ${info.via})`)
-          .join('; ');
-        contextParts.push(
-          `[TokenScout Graph] Related to ${relPath}: ${relSummary}`
-        );
+      // Only inject related files if budget allows
+      if (!terminate && deps.length > 0) {
+        const related = findRelatedViaGraphs(relPath, repoMap);
+        const relPaths = Object.keys(related).slice(0, 3);
+        if (relPaths.length) {
+          contextParts.push(`[TokenScout] Related: ${relPaths.join(', ')}`);
+        }
       }
 
       if (contextParts.length > 0) {

@@ -51,6 +51,10 @@ function main() {
 
   const state = loadState();
   const ctx = state.context_state;
+
+  // Simple queries — don't interfere with Claude's natural stopping
+  if (ctx.D_q < 20) process.exit(0);
+
   const kappa = ctx.kappa_t;
   const t = ctx.t;
   const budget = ctx.budget;

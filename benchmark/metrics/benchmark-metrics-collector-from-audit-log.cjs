@@ -103,31 +103,39 @@ function collectBaselineMetrics(claudeOutput) {
     try { parsed = JSON.parse(claudeOutput); } catch { parsed = {}; }
   }
 
-  const usage = parsed.usage || parsed.token_usage || {};
-  const toolUses = parsed.tool_uses || parsed.tool_calls || [];
-  const readFiles = [];
+  // claude -p --output-format json returns: { usage: { input_tokens, output_tokens, cache_* }, result, ... }
+  const usage = parsed.usage || {};
+  const modelUsage = parsed.modelUsage || {};
 
-  if (Array.isArray(toolUses)) {
-    for (const tu of toolUses) {
-      const name = (tu.name || tu.tool || '').toLowerCase();
-      if (name === 'read' && tu.input && tu.input.file_path) {
-        readFiles.push(tu.input.file_path);
-      }
-    }
-  }
+  // Extract token counts (including cache tokens for accurate billing)
+  const inputTokens = usage.input_tokens || 0;
+  const outputTokens = usage.output_tokens || 0;
+  const cacheCreation = usage.cache_creation_input_tokens || 0;
+  const cacheRead = usage.cache_read_input_tokens || 0;
 
-  const response = parsed.result || parsed.content || parsed.response || '';
+  // Total cost from claude CLI
+  const costUsd = parsed.total_cost_usd || 0;
+
+  // Duration
+  const durationMs = parsed.duration_ms || 0;
+  const durationApiMs = parsed.duration_api_ms || 0;
+  const numTurns = parsed.num_turns || 0;
+
+  // Response text
+  const response = parsed.result || parsed.content || '';
   const responseText = typeof response === 'string' ? response : JSON.stringify(response);
 
   return {
-    input_tokens: usage.input_tokens || parsed.input_tokens || 0,
-    output_tokens: usage.output_tokens || parsed.output_tokens || 0,
-    total_tokens: usage.total_tokens ||
-      (usage.input_tokens || 0) + (usage.output_tokens || 0) ||
-      parsed.total_tokens || 0,
-    tool_calls: Array.isArray(toolUses) ? toolUses.length : 0,
-    files_read: readFiles,
-    response_length: responseText.length
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    cache_creation_tokens: cacheCreation,
+    cache_read_tokens: cacheRead,
+    total_tokens: inputTokens + outputTokens + cacheCreation + cacheRead,
+    cost_usd: Math.round(costUsd * 1000000) / 1000000,
+    duration_ms: durationMs,
+    duration_api_ms: durationApiMs,
+    num_turns: numTurns,
+    response_length: responseText.length,
   };
 }
 

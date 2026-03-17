@@ -278,26 +278,17 @@ function main() {
   state.context_state = ctx;
   saveState(state);
 
-  // Build additionalContext
-  const contextParts = [
-    `[TokenScout Query Analysis] D_q=${Dq}, Budget=${budget} lines, H_r=${Hr.toFixed(2)}` +
-    (llmResult.intent ? `, Intent=${llmResult.intent}` : ''),
-  ];
-  if (llmResult.strategy) contextParts.push(`[TokenScout LLM Strategy] ${llmResult.strategy}`);
-  if (expandedTerms.length) contextParts.push(`[TokenScout Expanded Terms] ${expandedTerms.slice(0, 10).join(', ')}`);
-
-  if (Object.keys(finalCandidates).length) {
-    const top = Object.entries(finalCandidates).slice(0, 8)
-      .map(([p, i]) => `${p} (${i.provenance}, score=${i.score.toFixed(2)})`).join(', ');
-    contextParts.push(`[TokenScout Candidates] Priority targets: ${top}`);
-    contextParts.push(
-      '[TokenScout Strategy] Start with these candidates. ' +
-      'Use Grep/Glob to confirm relevance before Read. ' +
-      'Follow dependency edges for cross-file context.'
-    );
+  // Build additionalContext — MINIMAL to reduce token overhead
+  // Skip context for simple queries (D_q < 20) — not worth the token cost
+  if (Dq < 20 || Object.keys(finalCandidates).length === 0) {
+    // No injection for trivial queries
+    console.log(JSON.stringify({ additionalContext: '' }));
+  } else {
+    // Compact format: just file paths, no verbose metadata
+    const topPaths = Object.keys(finalCandidates).slice(0, 5);
+    const ctx_line = `[TokenScout] D_q=${Dq} B=${budget} | Read these first: ${topPaths.join(', ')}`;
+    console.log(JSON.stringify({ additionalContext: ctx_line }));
   }
-
-  console.log(JSON.stringify({ additionalContext: contextParts.join('\n') }));
 
   auditLog('query_augmentation', {
     D_q: Dq,

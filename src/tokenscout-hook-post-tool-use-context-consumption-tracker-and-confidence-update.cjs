@@ -67,6 +67,9 @@ function main() {
   const ctx = state.context_state;
   const repoMap = state.repo_map || {};
 
+  // Skip tracking for simple queries — zero overhead
+  if (ctx.D_q < 20) process.exit(0);
+
   // Increment iteration depth
   ctx.t += 1;
 
